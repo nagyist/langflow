@@ -1,5 +1,7 @@
 import { AxiosError } from "axios";
-import { cloneDeep, debounce } from "lodash";
+import { cloneDeep } from "lodash";
+import pDebounce from "p-debounce";
+import { useLocation } from "react-router-dom";
 import { Edge, Node, Viewport, XYPosition } from "reactflow";
 import { create } from "zustand";
 import { SAVE_DEBOUNCE_TIME } from "../constants/constants";
@@ -23,11 +25,13 @@ import {
   extractFieldsFromComponenents,
   processDataFromFlow,
   processFlows,
+  updateGroupRecursion,
 } from "../utils/reactflowUtils";
 import useAlertStore from "./alertStore";
 import { useDarkStore } from "./darkStore";
 import useFlowStore from "./flowStore";
 import { useFolderStore } from "./foldersStore";
+import { useGlobalVariablesStore } from "./globalVariablesStore/globalVariables";
 import { useTypesStore } from "./typesStore";
 
 let saveTimeoutId: NodeJS.Timeout | null = null;
@@ -85,7 +89,7 @@ const useFlowsManagerStore = create<FlowsManagerStoreType>((set, get) => ({
       readFlowsFromDatabase()
         .then((dbData) => {
           if (dbData) {
-            const { data, flows } = processFlows(dbData, false);
+            const { data, flows } = processFlows(dbData);
             const examples = flows.filter(
               (flow) => flow.folder_id === starterFolderId,
             );
@@ -128,7 +132,14 @@ const useFlowsManagerStore = create<FlowsManagerStoreType>((set, get) => ({
     set({ saveLoading: true }); // set saveLoading true immediately
     return get().saveFlowDebounce(flow, silent); // call the debounced function directly
   },
-  saveFlowDebounce: debounce((flow: FlowType, silent?: boolean) => {
+  saveFlowDebounce: pDebounce((flow: FlowType, silent?: boolean) => {
+    const folderUrl = useFolderStore.getState().folderUrl;
+    const hasFolderUrl = folderUrl != null && folderUrl !== "";
+
+    flow.folder_id = hasFolderUrl
+      ? useFolderStore.getState().folderUrl
+      : useFolderStore.getState().myCollectionId ?? "";
+
     set({ saveLoading: true });
     return new Promise<void>((resolve, reject) => {
       updateFlowInDatabase(flow)
@@ -199,11 +210,18 @@ const useFlowsManagerStore = create<FlowsManagerStoreType>((set, get) => ({
     position?: XYPosition,
     fromDragAndDrop?: boolean,
   ): Promise<string | undefined> => {
+    let flowData = flow
+      ? processDataFromFlow(flow)
+      : { nodes: [], edges: [], viewport: { zoom: 1, x: 0, y: 0 } };
+    flowData?.nodes.forEach((node) => {
+      updateGroupRecursion(
+        node,
+        flowData?.edges,
+        useGlobalVariablesStore.getState().unavaliableFields,
+        useGlobalVariablesStore.getState().globalVariablesEntries,
+      );
+    });
     if (newProject) {
-      let flowData = flow
-        ? processDataFromFlow(flow)
-        : { nodes: [], edges: [], viewport: { zoom: 1, x: 0, y: 0 } };
-
       // Create a new flow with a default name if no flow is provided.
       const folder_id = useFolderStore.getState().folderUrl;
       const my_collection_id = useFolderStore.getState().myCollectionId;
@@ -233,7 +251,6 @@ const useFlowsManagerStore = create<FlowsManagerStoreType>((set, get) => ({
         // addFlowToLocalState(newFlow);
         return;
       }
-      console.log("folder id", folder_id);
       const newFlow = createNewFlow(
         flowData!,
         flow!,
@@ -264,8 +281,20 @@ const useFlowsManagerStore = create<FlowsManagerStoreType>((set, get) => ({
 
         // Return the id
         return id;
-      } catch (error) {
-        // Handle the error if needed
+      } catch (error: any) {
+        if (error.response?.data?.detail) {
+          useAlertStore.getState().setErrorData({
+            title: "Could not load flows from database",
+            list: [error.response?.data?.detail],
+          });
+        } else {
+          useAlertStore.getState().setErrorData({
+            title: "Could not load flows from database",
+            list: [
+              error.message ?? "An unexpected error occurred, please try again",
+            ],
+          });
+        }
         throw error; // Re-throw the error so the caller can handle it if needed
       }
     } else {
